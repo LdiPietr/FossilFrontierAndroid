@@ -1,4 +1,4 @@
-FOSSIL FRONTIER – Android 1.0
+FOSSIL FRONTIER – Android 2.0
 =================================
 
 Original, offline, portrait-oriented fossil excavation game.
@@ -11,6 +11,11 @@ GAMEPLAY
 • Reconstruct dinosaur exhibits in the museum to generate passive income.
 • Upgrade pickaxe, automatic drill, fossil radar and mining cart.
 • Offline income for up to eight hours; local autosave.
+• Interactive brushing of fossil deposits; resume cleaning after closing the app.
+• 5 changing excavation biomes with new colors and environmental details.
+• Digging streak bonuses, cracking soil, dust animation and gentle feedback.
+• Animated museum visitors and richer pixel-art illustrations.
+• Installs as Fossil Frontier Expedition, separately from the original test APK.
 
 CONTROLS
 Bottom tabs: SCAVA / UPGRADE / MUSEO.

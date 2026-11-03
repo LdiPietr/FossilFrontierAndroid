@@ -10,6 +10,9 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.RectF;
+import android.media.AudioManager;
+import android.media.ToneGenerator;
+import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
@@ -38,10 +41,17 @@ public final class MainActivity extends Activity {
         super.onPause();
     }
 
+    @Override protected void onDestroy() {
+        if (game != null) game.close();
+        super.onDestroy();
+    }
+
     static final class Game extends View {
         static final int W = 1080, H = 1920, N = 9, CELL = 102, GX = 81, GY = 375;
         static final int SOIL = 0, ROCK = 1, BONE = 2, CRYSTAL = 3, CHEST = 4;
         static final String[] SPECIES = {"TRICERA", "STEGOSA", "RAPTOR", "BRONTON", "CERATON"};
+        static final String[] BIOMES = {"DUNE DORATE", "CANYON ROSSO", "GIUNGLA PERDUTA", "TUNDRA", "LAVA ANTICA"};
+
         static final int[] NEED = {4, 5, 6, 7, 8};
         static final int[] ASSEMBLE = {150, 370, 900, 2300, 5600};
         static final int[] RENT = {2, 6, 14, 36, 90};
@@ -62,6 +72,9 @@ public final class MainActivity extends Activity {
         private int depth = 1, pick = 1, drill = 0, radar = 0, cart = 0;
         private int page = 0; // DIG / SHOP / MUSEUM
         private int previousCell = -1;
+        private int pendingSpecies = -1, brushMask = 0, combo = 0;
+        private long lastDigAt = 0;
+        private ToneGenerator tone;
         private long frameTime = SystemClock.uptimeMillis(), bannerUntil = frameTime + 3500;
         private double autoTimer = 0, rentTimer = 0;
         private String banner = "TOCCA O TRASCINA PER SCAVARE";
@@ -72,8 +85,21 @@ public final class MainActivity extends Activity {
         Game(Context context) {
             super(context);
             prefs = context.getSharedPreferences("fossil_frontier_v1", Context.MODE_PRIVATE);
+            try { tone = new ToneGenerator(AudioManager.STREAM_MUSIC, 22); }
+            catch (Exception ignored) { tone = null; }
             restore();
         }
+
+        void close() {
+            if (tone != null) { tone.release(); tone = null; }
+        }
+
+        private void beep(int type) {
+            try { if (tone != null) tone.startTone(type, 90); }
+            catch (Exception ignored) { }
+        }
+
+        private int biome() { return ((depth - 1) / 5) % BIOMES.length; }
 
         private int difficulty() {
             return Math.min(12, (depth - 1) / 4);
@@ -111,6 +137,9 @@ public final class MainActivity extends Activity {
                 drill = Math.max(0, j.optInt("drill", 0));
                 radar = Math.max(0, j.optInt("radar", 0));
                 cart = Math.max(0, j.optInt("cart", 0));
+                pendingSpecies = j.optInt("pending", -1);
+                if (pendingSpecies < -1 || pendingSpecies >= SPECIES.length) pendingSpecies = -1;
+                brushMask = j.optInt("brush", 0) & 65535;
                 JSONArray bones = j.getJSONArray("bones");
                 JSONArray display = j.getJSONArray("exhibits");
                 for (int i = 0; i < SPECIES.length; i++) {
@@ -146,6 +175,8 @@ public final class MainActivity extends Activity {
                 j.put("drill", drill);
                 j.put("radar", radar);
                 j.put("cart", cart);
+                j.put("pending", pendingSpecies);
+                j.put("brush", brushMask);
                 j.put("time", System.currentTimeMillis());
                 JSONArray bones = new JSONArray(), displays = new JSONArray(), cells = new JSONArray();
                 for (int i = 0; i < SPECIES.length; i++) {
@@ -184,9 +215,7 @@ public final class MainActivity extends Activity {
             return left;
         }
 
-        private void foundFossil() {
-            int available = Math.min(SPECIES.length, 1 + (depth - 1) / 3);
-            int i = rng.nextInt(Math.max(1, available));
+        private void awardBone(int i) {
             if (exhibits[i]) {
                 coins += (i + 1) * 25L;
                 notice("FOSSILE DOPPIO: BONUS MONETE!");
@@ -195,11 +224,45 @@ public final class MainActivity extends Activity {
                 notice(pieces[i] >= NEED[i] ? SPECIES[i] + " PRONTO PER IL MUSEO!" :
                         "OSSO " + SPECIES[i] + ": " + pieces[i] + "/" + NEED[i]);
             }
+            beep(ToneGenerator.TONE_PROP_ACK);
+        }
+
+        private void foundFossil(boolean manual) {
+            int available = Math.min(SPECIES.length, 1 + (depth - 1) / 3);
+            int i = rng.nextInt(Math.max(1, available));
+            if (manual && !exhibits[i]) {
+                pendingSpecies = i;
+                brushMask = 0;
+                notice("UN FOSSILE! RIPULISCILO!");
+                save();
+            } else {
+                awardBone(i);
+            }
+        }
+
+        private void cleanAt(float x, float y) {
+            if (pendingSpecies < 0) return;
+            if (x < 194 || x >= 874 || y < 612 || y >= 1292) return;
+            int col = (int) ((x - 194) / 170);
+            int row = (int) ((y - 612) / 170);
+            if (col < 0 || col > 3 || row < 0 || row > 3) return;
+            int bit = 1 << (row * 4 + col);
+            if ((brushMask & bit) != 0) return;
+            brushMask |= bit;
+            performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+            if (Integer.bitCount(brushMask) >= 11) {
+                int finished = pendingSpecies;
+                pendingSpecies = -1;
+                brushMask = 0;
+                awardBone(finished);
+                save();
+            }
         }
 
         private void hit(int r, int c, boolean manual) {
             if (r < 0 || c < 0 || r >= N || c >= N || hp[r][c] == 0) return;
             hp[r][c] = Math.max(0, hp[r][c] - (manual ? pick : Math.max(1, pick / 2)));
+            if (manual) performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
             int index = particleIndex++ % particlesX.length;
             particlesX[index] = GX + c * CELL + 51;
             particlesY[index] = GY + r * CELL + 51;
@@ -210,13 +273,20 @@ public final class MainActivity extends Activity {
             if (type[r][c] == ROCK) reward += 8 + depth * 2L;
             if (type[r][c] == CHEST) reward += 27 + depth * 4L;
             if (type[r][c] == CRYSTAL) reward += 55 + depth * 7L;
+            if (manual) {
+                long now = SystemClock.uptimeMillis();
+                combo = now - lastDigAt < 2200 ? Math.min(15, combo + 1) : 1;
+                lastDigAt = now;
+                reward *= Math.min(3, 1 + combo / 5);
+            }
             coins += reward;
-            if (type[r][c] == BONE) foundFossil();
+            if (type[r][c] == BONE) foundFossil(manual);
             if (remaining() == 0) {
                 depth++;
                 coins += 70L + depth * 20L;
                 nextLayer();
                 notice("NUOVO STRATO! PROFONDITA' " + depth);
+                beep(ToneGenerator.TONE_PROP_BEEP);
             }
             if (dug % 9 == 0) save();
         }
@@ -236,6 +306,7 @@ public final class MainActivity extends Activity {
             if (i == 2) radar++;
             if (i == 3) cart++;
             notice("POTENZIAMENTO ACQUISTATO!");
+            beep(ToneGenerator.TONE_PROP_ACK);
             save();
         }
 
@@ -246,6 +317,7 @@ public final class MainActivity extends Activity {
             coins -= ASSEMBLE[i];
             exhibits[i] = true;
             notice(SPECIES[i] + " ESPOSTO! +" + RENT[i] + "/S");
+            beep(ToneGenerator.TONE_PROP_BEEP);
             save();
         }
 
@@ -254,7 +326,7 @@ public final class MainActivity extends Activity {
                 rentTimer += dt;
                 while (rentTimer >= 1) { rentTimer--; coins += rentPerSecond(); }
             }
-            if (drill > 0) {
+            if (drill > 0 && pendingSpecies < 0) {
                 autoTimer += dt;
                 double interval = Math.max(0.35, 3.2 / (1 + drill * 0.52));
                 if (autoTimer >= interval) {
@@ -329,24 +401,91 @@ public final class MainActivity extends Activity {
             }
             for (int i = 0; i < particlesX.length; i++) {
                 if (particlesUntil[i] > now) {
-                    int alpha = (int) (220f * (particlesUntil[i] - now) / 400f);
-                    rectangle(c, particlesX[i] - 8, particlesY[i] - 8,
-                            particlesX[i] + 8, particlesY[i] + 8,
+                    float age = 1f - (particlesUntil[i] - now) / 400f;
+                    int alpha = (int) (220f * (1f - age));
+                    float px = particlesX[i] + (i % 2 == 0 ? -1 : 1) * age * 60f;
+                    float py = particlesY[i] - age * age * 92f;
+                    rectangle(c, px - 9, py - 9, px + 9, py + 9,
                             Color.argb(Math.max(0, Math.min(255, alpha)), 255, 207, 103));
                 }
             }
+            if (pendingSpecies >= 0) drawCleaning(c);
             c.restore();
             postInvalidateDelayed(40);
         }
 
+        private void drawLandscape(Canvas c) {
+            int b = biome();
+            int[] sky = {0xFF9EE6DB, 0xFFF7B37B, 0xFFA6DAC5, 0xFFC4EAF7, 0xFFF48E7B};
+            int[] ridge = {0xFFD3AF73, 0xFFB86452, 0xFF5D9E74, 0xFF86AEC5, 0xFF773D50};
+            rectangle(c, 0, 288, W, 372, sky[b]);
+            rectangle(c, 0, 355, 265, 371, ridge[b]);
+            rectangle(c, 750, 344, 1080, 371, ridge[b]);
+            rectangle(c, 65, 330, 115, 353, ridge[b]);
+            rectangle(c, 135, 316, 164, 352, ridge[b]);
+            rectangle(c, 926, 315, 957, 345, ridge[b]);
+            if (b == 2) {
+                rectangle(c, 196, 319, 210, 361, DARK);
+                rectangle(c, 175, 304, 237, 330, Color.rgb(38, 126, 82));
+            } else if (b == 3) {
+                rectangle(c, 205, 299, 265, 312, CREAM);
+                rectangle(c, 270, 306, 320, 317, CREAM);
+            } else {
+                rectangle(c, 201, 307, 239, 342, GOLD);
+            }
+            text(c, BIOMES[b] + "  •  STRATO " + depth, 540, 341, 35, DARK, true);
+        }
+
+        private void drawCleaning(Canvas c) {
+            rectangle(c, 0, 0, W, H, Color.argb(248, 18, 40, 46));
+            text(c, "SCOPERTA FOSSILE!", 540, 260, 70, GOLD, true);
+            text(c, "RIPULISCI IL REPERTO TOCCANDO LA TERRA", 540, 353, 31, CREAM, true);
+            rounded(c, 154, 536, 927, 1364, 28, Color.rgb(221, 172, 105));
+            rounded(c, 183, 596, 885, 1309, 22, Color.rgb(71, 82, 76));
+            c.save();
+            c.translate(540, 970);
+            c.scale(3.1f, 3.1f);
+            dino(c, pendingSpecies, 0, 0, GOLD);
+            c.restore();
+            for (int row = 0; row < 4; row++) for (int col = 0; col < 4; col++) {
+                int bit = 1 << (row * 4 + col);
+                if ((brushMask & bit) != 0) continue;
+                int x = 194 + col * 170, y = 612 + row * 170;
+                rectangle(c, x, y, x + 168, y + 168,
+                        (row + col) % 2 == 0 ? Color.rgb(163, 111, 74) : Color.rgb(188, 133, 86));
+                rectangle(c, x + 26, y + 23, x + 62, y + 35, Color.rgb(125, 84, 62));
+                rectangle(c, x + 113, y + 109, x + 141, y + 125, Color.rgb(128, 88, 62));
+            }
+            text(c, SPECIES[pendingSpecies], 540, 482, 56, CREAM, true);
+            int clean = Integer.bitCount(brushMask);
+            rounded(c, 194, 1417, 874, 1460, 11, Color.rgb(85, 103, 97));
+            rounded(c, 197, 1420, 197 + clean * (674f / 11f), 1457, 9, TEAL);
+            text(c, clean + " / 11 PULITI", 540, 1539, 48, GOLD, true);
+            text(c, "TOCCA LE ZOLLE FINO A LIBERARE LE OSSA", 540, 1615, 28, CREAM, true);
+        }
+
+        private void drawVisitors(Canvas c, int exhibit, int top) {
+            for (int j = 0; j < 3; j++) {
+                float bob = (float) Math.sin(frameTime * 0.003 + j + exhibit) * 4f;
+                int x = 712 + j * 72, y = top + 140 + (int) bob;
+                int jacket = (j + exhibit) % 2 == 0 ? ORANGE : TEAL;
+                rectangle(c, x - 11, y - 30, x + 12, y - 7, CREAM);
+                rectangle(c, x - 16, y - 5, x + 17, y + 34, jacket);
+                rectangle(c, x - 13, y + 34, x - 2, y + 52, DARK);
+                rectangle(c, x + 4, y + 34, x + 15, y + 52, DARK);
+            }
+        }
+
         private void drawDig(Canvas c) {
-            rectangle(c, 0, 288, W, 372, Color.rgb(116, 202, 186));
-            text(c, "SITO DI SCAVO " + (1 + (depth - 1) / 5), 540, 345, 46, DARK, true);
-            rectangle(c, 53, 369, 1026, 1302, Color.rgb(64, 55, 55));
+            drawLandscape(c);
+            rectangle(c, 53, 369, 1026, 1302, Color.rgb(45, 51, 52));
             for (int row = 0; row < N; row++) for (int col = 0; col < N; col++)
                 drawCell(c, row, col);
             rounded(c, 67, 1352, 1014, 1550, 28, DARK);
             text(c, "TERRA DA RIMUOVERE", 105, 1416, 39, CREAM, false);
+            if (combo > 1 && SystemClock.uptimeMillis() - lastDigAt < 2400)
+                text(c, "COMBO x" + Math.min(3, 1 + combo / 5),
+                        968, 1417, 34, ORANGE, true);
             text(c, remaining() + " / 81 BLOCCHI", 540, 1502, 60, GOLD, true);
             rounded(c, 78, 1581, 1002, 1619, 8, Color.rgb(196, 213, 181));
             float completed = (81 - remaining()) / 81f;
@@ -361,12 +500,18 @@ public final class MainActivity extends Activity {
                 rectangle(c, x + 9, y + 9, x + 22, y + 17, Color.rgb(76, 64, 61));
                 return;
             }
-            int base = Math.max(92, 201 - difficulty() * 11 - row * 3);
-            int soil = Color.rgb(base, Math.max(65, base - 48), Math.max(45, base - 89));
+            int[][] palettes = {{205, 161, 100}, {195, 114, 83},
+                    {125, 155, 99}, {170, 199, 213}, {112, 78, 91}};
+            int[] shade = palettes[biome()];
+            int fade = difficulty() * 4 + row * 2;
+            int soil = Color.rgb(Math.max(50, shade[0] - fade),
+                    Math.max(48, shade[1] - fade), Math.max(42, shade[2] - fade));
+            int stone = biome() == 3 ? Color.rgb(110, 150, 167) :
+                    biome() == 4 ? Color.rgb(84, 69, 88) : Color.rgb(124, 123, 114);
             rectangle(c, x + 2, y + 2, x + CELL - 2, y + CELL - 2,
-                    type[row][col] == ROCK ? Color.rgb(124, 123, 114) : soil);
-            rectangle(c, x + 10, y + 12, x + 32, y + 22, Color.rgb(152, 97, 65));
-            rectangle(c, x + 69, y + 56, x + 82, y + 65, Color.rgb(155, 98, 66));
+                    type[row][col] == ROCK ? stone : soil);
+            rectangle(c, x + 10, y + 12, x + 32, y + 22, Color.argb(100, 95, 80, 65));
+            rectangle(c, x + 69, y + 56, x + 82, y + 65, Color.argb(100, 95, 80, 65));
             if (type[row][col] == ROCK) {
                 rectangle(c, x + 25, y + 31, x + 73, y + 72, Color.rgb(89, 91, 87));
                 rectangle(c, x + 31, y + 34, x + 57, y + 43, Color.rgb(181, 171, 153));
@@ -386,6 +531,12 @@ public final class MainActivity extends Activity {
                 rectangle(c, x + 46, y + 38, x + 57, y + 71, DARK);
             }
             if (hp[row][col] < max[row][col]) {
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(5);
+                p.setColor(Color.argb(165, 46, 41, 40));
+                c.drawLine(x + 28, y + 20, x + 49, y + 51, p);
+                c.drawLine(x + 49, y + 51, x + 66, y + 66, p);
+                p.setStyle(Paint.Style.FILL);
                 rectangle(c, x + 11, y + CELL - 16, x + 91, y + CELL - 9, DARK);
                 rectangle(c, x + 11, y + CELL - 16,
                         x + 11 + 80f * hp[row][col] / max[row][col],
@@ -451,6 +602,7 @@ public final class MainActivity extends Activity {
                         exhibits[i] ? GOLD : Color.rgb(175, 226, 206), false);
                 if (exhibits[i]) {
                     text(c, "COLLEZIONE COMPLETA", 312, y + 165, 28, GOLD, false);
+                    drawVisitors(c, i, y);
                 } else {
                     boolean enough = pieces[i] >= NEED[i] && coins >= ASSEMBLE[i];
                     rounded(c, 657, y + 143, 979, y + 195, 12,
@@ -490,6 +642,11 @@ public final class MainActivity extends Activity {
                 return true;
             }
             if (action != MotionEvent.ACTION_DOWN && action != MotionEvent.ACTION_MOVE) return true;
+            if (pendingSpecies >= 0) {
+                cleanAt(x, y);
+                invalidate();
+                return true;
+            }
             if (action == MotionEvent.ACTION_DOWN && y >= 1728) {
                 int target = x < 365 ? 0 : x < 716 ? 1 : 2;
                 page = target;
