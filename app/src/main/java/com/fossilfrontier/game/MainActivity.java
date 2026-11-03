@@ -53,8 +53,8 @@ public final class MainActivity extends Activity {
         static final String[] BIOMES = {"DUNE DORATE", "CANYON ROSSO", "GIUNGLA PERDUTA", "TUNDRA", "LAVA ANTICA"};
 
         static final int[] NEED = {4, 5, 6, 7, 8};
-        static final int[] ASSEMBLE = {150, 370, 900, 2300, 5600};
-        static final int[] RENT = {2, 6, 14, 36, 90};
+        static final int[] ASSEMBLE = {200, 700, 1900, 5500, 14000};
+        static final int[] RENT = {2, 5, 12, 28, 65};
         static final int DARK = Color.rgb(20, 47, 50);
         static final int CREAM = Color.rgb(255, 247, 220);
         static final int GOLD = Color.rgb(255, 203, 90);
@@ -68,16 +68,17 @@ public final class MainActivity extends Activity {
         private final int[][] max = new int[N][N];
         private final int[] pieces = new int[SPECIES.length];
         private final boolean[] exhibits = new boolean[SPECIES.length];
-        private long coins = 120, dug = 0;
-        private int depth = 1, pick = 1, drill = 0, radar = 0, cart = 0;
-        private int page = 0; // DIG / SHOP / MUSEUM
-        private int previousCell = -1;
-        private int pendingSpecies = -1, brushMask = 0, combo = 0;
+        private final int[] exhibitLevel = new int[SPECIES.length];
+        private long coins = 30, dug = 0, carriedValue = 0, lifetimeSales = 0;
+        private int depth = 1, pick = 1, drill = 0, radar = 0, cart = 0, pack = 0, amber = 0;
+        private int page = 0; // SCAVA / BASE / UPGRADE / MUSEO
+        private int previousCell = -1, combo = 0;
+        private long prestigeConfirmUntil = 0;
         private long lastDigAt = 0;
         private ToneGenerator tone;
         private long frameTime = SystemClock.uptimeMillis(), bannerUntil = frameTime + 3500;
         private double autoTimer = 0, rentTimer = 0;
-        private String banner = "TOCCA O TRASCINA PER SCAVARE";
+        private String banner = "SCAVA, RIEMPI LO ZAINO, VENDI ALLA BASE";
         private final float[] particlesX = new float[22], particlesY = new float[22];
         private final long[] particlesUntil = new long[22];
         private int particleIndex = 0;
@@ -102,8 +103,23 @@ public final class MainActivity extends Activity {
         private int biome() { return ((depth - 1) / 5) % BIOMES.length; }
 
         private int difficulty() {
-            return Math.min(12, (depth - 1) / 4);
+            return Math.min(40, (depth - 1) / 3);
         }
+
+        private int capacity() { return Math.min(160, 12 + cart * 7); }
+
+        private boolean full() { return pack >= capacity(); }
+
+        private static long safe(double value) {
+            if (Double.isNaN(value) || value <= 0) return 0;
+            return value >= 1000000000000000d ? 1000000000000000L : (long)Math.ceil(value);
+        }
+
+        private static long plus(long a, long b) {
+            return a > 1000000000000000L - b ? 1000000000000000L : a + b;
+        }
+
+        private double amberBoost() { return 1d + amber * 0.3d; }
 
         private void nextLayer() {
             int hard = difficulty();
@@ -121,7 +137,11 @@ public final class MainActivity extends Activity {
 
         private long rentPerSecond() {
             long total = 0;
-            for (int i = 0; i < exhibits.length; i++) if (exhibits[i]) total += RENT[i];
+            for (int i = 0; i < exhibits.length; i++) {
+                if (exhibits[i]) {
+                    total = plus(total, safe(RENT[i] * Math.pow(1.7, Math.max(0, exhibitLevel[i] - 1)) * amberBoost()));
+                }
+            }
             return total;
         }
 
@@ -130,21 +150,24 @@ public final class MainActivity extends Activity {
             if (content == null) { nextLayer(); return; }
             try {
                 JSONObject j = new JSONObject(content);
-                coins = j.optLong("coins", 120);
-                dug = j.optLong("dug", 0);
+                coins = Math.max(0, j.optLong("coins", 30));
+                dug = Math.max(0, j.optLong("dug", 0));
                 depth = Math.max(1, j.optInt("depth", 1));
                 pick = Math.max(1, j.optInt("pick", 1));
                 drill = Math.max(0, j.optInt("drill", 0));
                 radar = Math.max(0, j.optInt("radar", 0));
                 cart = Math.max(0, j.optInt("cart", 0));
-                pendingSpecies = j.optInt("pending", -1);
-                if (pendingSpecies < -1 || pendingSpecies >= SPECIES.length) pendingSpecies = -1;
-                brushMask = j.optInt("brush", 0) & 65535;
+                pack = Math.max(0, j.optInt("pack", 0));
+                carriedValue = Math.max(0, j.optLong("carry", 0));
+                lifetimeSales = Math.max(0, j.optLong("sales", 0));
+                amber = Math.max(0, j.optInt("amber", 0));
                 JSONArray bones = j.getJSONArray("bones");
                 JSONArray display = j.getJSONArray("exhibits");
+                JSONArray levels = j.optJSONArray("museumLevels");
                 for (int i = 0; i < SPECIES.length; i++) {
                     pieces[i] = Math.max(0, bones.optInt(i));
                     exhibits[i] = display.optBoolean(i, false);
+                    exhibitLevel[i] = exhibits[i] ? Math.max(1, levels == null ? 1 : levels.optInt(i, 1)) : 0;
                 }
                 JSONArray cells = j.getJSONArray("cells");
                 if (cells.length() != N * N) throw new IllegalStateException("Invalid save map");
@@ -155,12 +178,15 @@ public final class MainActivity extends Activity {
                     max[r][c] = cell.getInt(2);
                 }
                 long away = Math.max(0, (System.currentTimeMillis() - j.optLong("time", System.currentTimeMillis())) / 1000);
-                long bonus = Math.min(away, 8 * 3600) * rentPerSecond();
-                coins += bonus;
+                long bonus = safe(Math.min(away, 6 * 3600) * (double)rentPerSecond());
+                coins = plus(coins, bonus);
                 if (bonus > 0) notice("MUSEO OFFLINE: +" + money(bonus));
             } catch (Exception badSave) {
-                coins = 120; dug = 0; depth = 1; pick = 1; drill = radar = cart = 0;
-                for (int i = 0; i < SPECIES.length; i++) { pieces[i] = 0; exhibits[i] = false; }
+                coins = 30; dug = 0; depth = 1; pick = 1; drill = radar = cart = pack = amber = 0;
+                carriedValue = lifetimeSales = 0;
+                for (int i = 0; i < SPECIES.length; i++) {
+                    pieces[i] = 0; exhibits[i] = false; exhibitLevel[i] = 0;
+                }
                 nextLayer();
             }
         }
@@ -175,22 +201,25 @@ public final class MainActivity extends Activity {
                 j.put("drill", drill);
                 j.put("radar", radar);
                 j.put("cart", cart);
-                j.put("pending", pendingSpecies);
-                j.put("brush", brushMask);
+                j.put("pack", pack);
+                j.put("carry", carriedValue);
+                j.put("sales", lifetimeSales);
+                j.put("amber", amber);
                 j.put("time", System.currentTimeMillis());
-                JSONArray bones = new JSONArray(), displays = new JSONArray(), cells = new JSONArray();
+                JSONArray bones = new JSONArray(), displays = new JSONArray();
+                JSONArray levels = new JSONArray(), cells = new JSONArray();
                 for (int i = 0; i < SPECIES.length; i++) {
                     bones.put(pieces[i]);
                     displays.put(exhibits[i]);
+                    levels.put(exhibitLevel[i]);
                 }
                 for (int r = 0; r < N; r++) for (int c = 0; c < N; c++) {
                     JSONArray cell = new JSONArray();
                     cell.put(type[r][c]); cell.put(hp[r][c]); cell.put(max[r][c]);
                     cells.put(cell);
                 }
-                j.put("bones", bones);
-                j.put("exhibits", displays);
-                j.put("cells", cells);
+                j.put("bones", bones); j.put("exhibits", displays);
+                j.put("museumLevels", levels); j.put("cells", cells);
                 prefs.edit().putString("state", j.toString()).apply();
             } catch (Exception ignored) {
                 notice("ERRORE DI SALVATAGGIO");
@@ -198,9 +227,10 @@ public final class MainActivity extends Activity {
         }
 
         private static String money(long amount) {
-            if (amount >= 1000000000L) return amount / 1000000000L + "B";
-            if (amount >= 1000000L) return amount / 1000000L + "M";
-            if (amount >= 10000L) return amount / 1000L + "K";
+            if (amount >= 1000000000000L) return String.format(java.util.Locale.ROOT, "%.1fT", amount / 1000000000000d);
+            if (amount >= 1000000000L) return String.format(java.util.Locale.ROOT, "%.1fB", amount / 1000000000d);
+            if (amount >= 1000000L) return String.format(java.util.Locale.ROOT, "%.1fM", amount / 1000000d);
+            if (amount >= 10000L) return String.format(java.util.Locale.ROOT, "%.1fK", amount / 1000d);
             return Long.toString(amount);
         }
 
@@ -217,8 +247,8 @@ public final class MainActivity extends Activity {
 
         private void awardBone(int i) {
             if (exhibits[i]) {
-                coins += (i + 1) * 25L;
-                notice("FOSSILE DOPPIO: BONUS MONETE!");
+                carriedValue = plus(carriedValue, (i + 1) * 18L);
+                notice("FOSSILE DOPPIO: VALORE EXTRA NELLO ZAINO");
             } else {
                 pieces[i]++;
                 notice(pieces[i] >= NEED[i] ? SPECIES[i] + " PRONTO PER IL MUSEO!" :
@@ -227,41 +257,29 @@ public final class MainActivity extends Activity {
             beep(ToneGenerator.TONE_PROP_ACK);
         }
 
-        private void foundFossil(boolean manual) {
+        private void foundFossil() {
             int available = Math.min(SPECIES.length, 1 + (depth - 1) / 3);
-            int i = rng.nextInt(Math.max(1, available));
-            if (manual && !exhibits[i]) {
-                pendingSpecies = i;
-                brushMask = 0;
-                notice("UN FOSSILE! RIPULISCILO!");
-                save();
-            } else {
-                awardBone(i);
-            }
+            awardBone(rng.nextInt(Math.max(1, available)));
         }
 
-        private void cleanAt(float x, float y) {
-            if (pendingSpecies < 0) return;
-            if (x < 194 || x >= 874 || y < 612 || y >= 1292) return;
-            int col = (int) ((x - 194) / 170);
-            int row = (int) ((y - 612) / 170);
-            if (col < 0 || col > 3 || row < 0 || row > 3) return;
-            int bit = 1 << (row * 4 + col);
-            if ((brushMask & bit) != 0) return;
-            brushMask |= bit;
-            performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
-            if (Integer.bitCount(brushMask) >= 11) {
-                int finished = pendingSpecies;
-                pendingSpecies = -1;
-                brushMask = 0;
-                awardBone(finished);
-                save();
-            }
+        private long rewardFor(int tile, boolean manual) {
+            double value = (3d + depth * 2d) * Math.pow(1.12, Math.min(100, depth - 1));
+            if (tile == ROCK) value *= 1.4;
+            if (tile == CHEST) value *= 3.5;
+            if (tile == CRYSTAL) value *= 2.8;
+            if (tile == BONE) value *= 1.2;
+            value *= amberBoost();
+            if (manual) value *= 1d + Math.min(8, combo) * 0.04d;
+            return safe(value);
         }
 
         private void hit(int r, int c, boolean manual) {
             if (r < 0 || c < 0 || r >= N || c >= N || hp[r][c] == 0) return;
-            hp[r][c] = Math.max(0, hp[r][c] - (manual ? pick : Math.max(1, pick / 2)));
+            if (full()) {
+                if (manual) notice("ZAINO PIENO! VENDI I REPERTI ALLA BASE");
+                return;
+            }
+            hp[r][c] = Math.max(0, hp[r][c] - (manual ? pick : Math.max(1, (pick + 1) / 2)));
             if (manual) performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
             int index = particleIndex++ % particlesX.length;
             particlesX[index] = GX + c * CELL + 51;
@@ -269,35 +287,38 @@ public final class MainActivity extends Activity {
             particlesUntil[index] = SystemClock.uptimeMillis() + 400;
             if (hp[r][c] > 0) return;
             dug++;
-            long reward = (4L + depth) * (1L + cart);
-            if (type[r][c] == ROCK) reward += 8 + depth * 2L;
-            if (type[r][c] == CHEST) reward += 27 + depth * 4L;
-            if (type[r][c] == CRYSTAL) reward += 55 + depth * 7L;
             if (manual) {
                 long now = SystemClock.uptimeMillis();
-                combo = now - lastDigAt < 2200 ? Math.min(15, combo + 1) : 1;
+                combo = now - lastDigAt < 1800 ? Math.min(12, combo + 1) : 1;
                 lastDigAt = now;
-                reward *= Math.min(3, 1 + combo / 5);
             }
-            coins += reward;
-            if (type[r][c] == BONE) foundFossil(manual);
+            pack++;
+            carriedValue = plus(carriedValue, rewardFor(type[r][c], manual));
+            if (type[r][c] == BONE) foundFossil();
             if (remaining() == 0) {
                 depth++;
-                coins += 70L + depth * 20L;
+                carriedValue = plus(carriedValue, safe((25 + depth * 8d) * amberBoost()));
                 nextLayer();
                 notice("NUOVO STRATO! PROFONDITA' " + depth);
                 beep(ToneGenerator.TONE_PROP_BEEP);
             }
-            if (dug % 9 == 0) save();
+            if (full()) {
+                notice("ZAINO PIENO! TORNA ALLA BASE");
+                beep(ToneGenerator.TONE_PROP_BEEP2);
+            }
+            if (dug % 7 == 0 || full()) save();
         }
 
         private long price(int upgrade) {
-            int current = upgrade == 0 ? pick : upgrade == 1 ? drill : upgrade == 2 ? radar : cart;
-            long base = upgrade == 0 ? 75 : upgrade == 1 ? 220 : upgrade == 2 ? 170 : 130;
-            return Math.max(30, base * (current + 1L) * (current + 1L) / (upgrade == 0 ? 4 : 1));
+            int tier = upgrade == 0 ? pick - 1 : upgrade == 1 ? drill : upgrade == 2 ? radar : cart;
+            double base = upgrade == 0 ? 75d : upgrade == 1 ? 480d : upgrade == 2 ? 280d : 165d;
+            double growth = upgrade == 0 ? 1.82d : upgrade == 1 ? 1.95d : upgrade == 2 ? 1.93d : 1.85d;
+            return safe(base * Math.pow(growth, Math.max(0, tier)));
         }
 
         private void upgrade(int i) {
+            if (i == 2 && radar >= 6) { notice("RADAR AL MASSIMO"); return; }
+            if (i == 3 && cart >= 22) { notice("ZAINO AL MASSIMO"); return; }
             long cost = price(i);
             if (coins < cost) { notice("MONETE INSUFFICIENTI"); return; }
             coins -= cost;
@@ -305,40 +326,91 @@ public final class MainActivity extends Activity {
             if (i == 1) drill++;
             if (i == 2) radar++;
             if (i == 3) cart++;
-            notice("POTENZIAMENTO ACQUISTATO!");
+            notice(i == 0 ? "PICCONE PIU' FORTE!" : i == 1 ? "TRIVELLA MIGLIORATA!" :
+                    i == 2 ? "RADAR PIU' PRECISO!" : "ZAINO AMPLIATO!");
             beep(ToneGenerator.TONE_PROP_ACK);
             save();
         }
 
+        private long museumPrice(int i) {
+            return safe(RENT[i] * 115d * Math.pow(1.75, Math.max(0, exhibitLevel[i] - 1)));
+        }
+
         private void assemble(int i) {
-            if (exhibits[i]) { notice("GIA' IN ESPOSIZIONE"); return; }
-            if (pieces[i] < NEED[i]) { notice("SERVONO ALTRI FOSSILI"); return; }
-            if (coins < ASSEMBLE[i]) { notice("MONETE INSUFFICIENTI"); return; }
-            coins -= ASSEMBLE[i];
-            exhibits[i] = true;
-            notice(SPECIES[i] + " ESPOSTO! +" + RENT[i] + "/S");
+            if (exhibits[i]) {
+                long cost = museumPrice(i);
+                if (coins < cost) { notice("MONETE INSUFFICIENTI"); return; }
+                coins -= cost;
+                exhibitLevel[i]++;
+                notice(SPECIES[i] + " MIGLIORATO! +" + money(rentPerSecond()) + "/SEC TOTALI");
+            } else {
+                if (pieces[i] < NEED[i]) { notice("SERVONO ALTRI FOSSILI"); return; }
+                if (coins < ASSEMBLE[i]) { notice("MONETE INSUFFICIENTI"); return; }
+                coins -= ASSEMBLE[i];
+                exhibits[i] = true;
+                exhibitLevel[i] = 1;
+                notice(SPECIES[i] + " ESPOSTO! ENTRATE AUTOMATICHE");
+            }
+            beep(ToneGenerator.TONE_PROP_BEEP);
+            save();
+        }
+
+        private void sell() {
+            if (pack == 0) { notice("LO ZAINO E' VUOTO! VAI A SCAVARE"); page = 0; return; }
+            long value = carriedValue;
+            coins = plus(coins, value);
+            lifetimeSales = plus(lifetimeSales, value);
+            pack = 0; carriedValue = 0;
+            combo = 0; autoTimer = 0;
+            page = 0;
+            notice("VENDUTO! +" + money(value) + " MONETE");
+            beep(ToneGenerator.TONE_PROP_ACK);
+            save();
+        }
+
+        private void ascend() {
+            if (depth < 12) { notice("RAGGIUNGI LO STRATO 12 PER RINASCERE"); return; }
+            long now = SystemClock.uptimeMillis();
+            if (now > prestigeConfirmUntil) {
+                prestigeConfirmUntil = now + 5000;
+                notice("ATTENZIONE: TOCCA ANCORA PER AZZERARE LA SPEDIZIONE");
+                return;
+            }
+            int gained = Math.max(1, 1 + (depth - 12) / 4);
+            amber = Math.min(100000, amber + gained);
+            coins = 30; dug = 0; depth = pick = 1;
+            drill = radar = cart = pack = 0;
+            carriedValue = 0; combo = 0; autoTimer = rentTimer = 0;
+            for (int i = 0; i < SPECIES.length; i++) {
+                pieces[i] = 0; exhibits[i] = false; exhibitLevel[i] = 0;
+            }
+            prestigeConfirmUntil = 0;
+            nextLayer();
+            page = 0;
+            notice("RINASCITA! +" + gained + " AMBRA, BONUS PERMANENTE");
             beep(ToneGenerator.TONE_PROP_BEEP);
             save();
         }
 
         private void tick(float dt) {
-            if (rentPerSecond() > 0) {
-                rentTimer += dt;
-                while (rentTimer >= 1) { rentTimer--; coins += rentPerSecond(); }
+            rentTimer += dt;
+            if (rentTimer >= 1) {
+                int seconds = (int) rentTimer;
+                rentTimer -= seconds;
+                if (rentPerSecond() > 0) coins = plus(coins, safe(seconds * (double)rentPerSecond()));
             }
-            if (drill > 0 && pendingSpecies < 0) {
-                autoTimer += dt;
-                double interval = Math.max(0.35, 3.2 / (1 + drill * 0.52));
-                if (autoTimer >= interval) {
-                    autoTimer = 0;
-                    for (int tries = 0; tries < N * N; tries++) {
-                        int index = rng.nextInt(N * N);
-                        if (hp[index / N][index % N] > 0) {
-                            hit(index / N, index % N, false);
-                            break;
-                        }
-                    }
-                }
+            if (drill <= 0 || full()) return;
+            autoTimer += dt;
+            double interval = Math.max(0.7, 4.0 * Math.pow(0.87, drill - 1));
+            if (autoTimer < interval) return;
+            autoTimer -= interval;
+            int index = rng.nextInt(N * N);
+            if (hp[index / N][index % N] > 0) {
+                hit(index / N, index % N, false);
+                return;
+            }
+            for (int r = 0; r < N; r++) for (int c = 0; c < N; c++) {
+                if (hp[r][c] > 0) { hit(r, c, false); return; }
             }
         }
 
@@ -383,17 +455,18 @@ public final class MainActivity extends Activity {
             rounded(c, 54, 174, 1025, 249, 13, Color.rgb(42, 79, 78));
             text(c, "PROF. " + depth, 75, 223, 36, CREAM, false);
             text(c, "SCAVI " + money(dug), 350, 223, 32, CREAM, false);
-            text(c, "+" + rentPerSecond() + "/SEC", 786, 223, 30, GOLD, false);
+            text(c, "+" + money(rentPerSecond()) + "/SEC", 786, 223, 30, GOLD, false);
             if (page == 0) drawDig(c);
-            if (page == 1) drawShop(c);
-            if (page == 2) drawMuseum(c);
+            if (page == 1) drawBase(c);
+            if (page == 2) drawShop(c);
+            if (page == 3) drawMuseum(c);
             rectangle(c, 0, 1728, W, H, DARK);
-            String[] names = {"SCAVA", "UPGRADE", "MUSEO"};
-            for (int i = 0; i < 3; i++) {
-                int x = 42 + i * 345;
-                rounded(c, x, 1757, x + 315, 1879, 22,
+            String[] names = {"SCAVA", "BASE", "UPGRADE", "MUSEO"};
+            for (int i = 0; i < 4; i++) {
+                int x = 24 + i * 264;
+                rounded(c, x, 1757, x + 240, 1879, 18,
                         i == page ? GOLD : Color.rgb(45, 86, 83));
-                text(c, names[i], x + 158, 1833, 42, i == page ? DARK : CREAM, true);
+                text(c, names[i], x + 120, 1832, 35, i == page ? DARK : CREAM, true);
             }
             if (now < bannerUntil) {
                 rounded(c, 75, 1634, 1005, 1708, 18, DARK);
@@ -409,7 +482,6 @@ public final class MainActivity extends Activity {
                             Color.argb(Math.max(0, Math.min(255, alpha)), 255, 207, 103));
                 }
             }
-            if (pendingSpecies >= 0) drawCleaning(c);
             c.restore();
             postInvalidateDelayed(40);
         }
@@ -436,32 +508,32 @@ public final class MainActivity extends Activity {
             text(c, BIOMES[b] + "  •  STRATO " + depth, 540, 341, 35, DARK, true);
         }
 
-        private void drawCleaning(Canvas c) {
-            rectangle(c, 0, 0, W, H, Color.argb(248, 18, 40, 46));
-            text(c, "SCOPERTA FOSSILE!", 540, 260, 70, GOLD, true);
-            text(c, "RIPULISCI IL REPERTO TOCCANDO LA TERRA", 540, 353, 31, CREAM, true);
-            rounded(c, 154, 536, 927, 1364, 28, Color.rgb(221, 172, 105));
-            rounded(c, 183, 596, 885, 1309, 22, Color.rgb(71, 82, 76));
-            c.save();
-            c.translate(540, 970);
-            c.scale(3.1f, 3.1f);
-            dino(c, pendingSpecies, 0, 0, GOLD);
-            c.restore();
-            for (int row = 0; row < 4; row++) for (int col = 0; col < 4; col++) {
-                int bit = 1 << (row * 4 + col);
-                if ((brushMask & bit) != 0) continue;
-                int x = 194 + col * 170, y = 612 + row * 170;
-                rectangle(c, x, y, x + 168, y + 168,
-                        (row + col) % 2 == 0 ? Color.rgb(163, 111, 74) : Color.rgb(188, 133, 86));
-                rectangle(c, x + 26, y + 23, x + 62, y + 35, Color.rgb(125, 84, 62));
-                rectangle(c, x + 113, y + 109, x + 141, y + 125, Color.rgb(128, 88, 62));
-            }
-            text(c, SPECIES[pendingSpecies], 540, 482, 56, CREAM, true);
-            int clean = Integer.bitCount(brushMask);
-            rounded(c, 194, 1417, 874, 1460, 11, Color.rgb(85, 103, 97));
-            rounded(c, 197, 1420, 197 + clean * (674f / 11f), 1457, 9, TEAL);
-            text(c, clean + " / 11 PULITI", 540, 1539, 48, GOLD, true);
-            text(c, "TOCCA LE ZOLLE FINO A LIBERARE LE OSSA", 540, 1615, 28, CREAM, true);
+        private void drawBase(Canvas c) {
+            rectangle(c, 0, 288, W, 1695, Color.rgb(230, 230, 206));
+            text(c, "CAMPO BASE", 540, 360, 64, DARK, true);
+            rounded(c, 58, 400, 1022, 790, 32, DARK);
+            rounded(c, 77, 418, 1003, 774, 24, Color.rgb(45, 91, 86));
+            text(c, "IL TUO ZAINO", 110, 484, 44, CREAM, false);
+            text(c, pack + " / " + capacity() + " REPERTI", 110, 551, 61, GOLD, false);
+            text(c, "VALORE ALLA VENDITA", 110, 635, 34, CREAM, false);
+            text(c, money(carriedValue) + " MONETE", 112, 706, 59, GOLD, false);
+            rounded(c, 95, 736, 984, 760, 9, Color.rgb(93, 125, 114));
+            if (pack > 0) rounded(c, 98, 739, 98 + (float)pack / capacity() * 884, 757, 8, ORANGE);
+            rounded(c, 85, 829, 995, 1018, 27, pack > 0 ? GOLD : Color.rgb(154, 158, 142));
+            text(c, pack > 0 ? "VENDI IL CARICO" : "ZAINO VUOTO", 540, 902, 57, DARK, true);
+            text(c, pack > 0 ? "+" + money(carriedValue) + " MONETE" : "TORNA A SCAVARE", 540, 963, 41, DARK, true);
+            rounded(c, 59, 1060, 1021, 1295, 25, Color.rgb(202, 218, 197));
+            text(c, "COME SI AVANZA", 93, 1121, 41, DARK, false);
+            text(c, "1. SCAVA FINO A RIEMPIRE LO ZAINO", 93, 1177, 34, DARK, false);
+            text(c, "2. VENDI, POTENZIA E TORNA PIU' IN PROFONDITA'", 93, 1230, 28, DARK, false);
+            rounded(c, 59, 1330, 1021, 1615, 25, DARK);
+            text(c, "AMBRA PERMANENTE: " + amber, 92, 1405, 43, GOLD, false);
+            text(c, "OGNI AMBRA = +30% VALORE E VISITATORI", 92, 1460, 29, CREAM, false);
+            boolean unlock = depth >= 12;
+            rounded(c, 93, 1490, 985, 1585, 18, unlock ? ORANGE : Color.rgb(92, 114, 110));
+            text(c, unlock ? "RINASCI (AZZERA LA SPEDIZIONE)" :
+                    "RINASCITA DISPONIBILE ALLO STRATO 12", 540, 1551,
+                    unlock ? 37 : 31, unlock ? DARK : CREAM, true);
         }
 
         private void drawVisitors(Canvas c, int exhibit, int top) {
@@ -482,14 +554,22 @@ public final class MainActivity extends Activity {
             for (int row = 0; row < N; row++) for (int col = 0; col < N; col++)
                 drawCell(c, row, col);
             rounded(c, 67, 1352, 1014, 1550, 28, DARK);
-            text(c, "TERRA DA RIMUOVERE", 105, 1416, 39, CREAM, false);
-            if (combo > 1 && SystemClock.uptimeMillis() - lastDigAt < 2400)
-                text(c, "COMBO x" + Math.min(3, 1 + combo / 5),
-                        968, 1417, 34, ORANGE, true);
-            text(c, remaining() + " / 81 BLOCCHI", 540, 1502, 60, GOLD, true);
+            text(c, "ZAINO: " + pack + "/" + capacity(), 102, 1418, 43, full() ? ORANGE : CREAM, false);
+            if (combo > 1 && SystemClock.uptimeMillis() - lastDigAt < 1900)
+                text(c, "COMBO +" + Math.min(32, combo * 4) + "%",
+                        891, 1418, 30, ORANGE, true);
+            text(c, "REPERTI " + money(carriedValue), 103, 1495, 41, GOLD, false);
+            text(c, remaining() + "/81", 912, 1495, 38, CREAM, true);
             rounded(c, 78, 1581, 1002, 1619, 8, Color.rgb(196, 213, 181));
-            float completed = (81 - remaining()) / 81f;
-            rounded(c, 80, 1583, 80 + 920 * completed, 1617, 8, TEAL);
+            if (pack > 0) rounded(c, 80, 1583, 80 + 920f * pack / capacity(), 1617, 8, TEAL);
+            if (full()) {
+                rectangle(c, 55, 500, 1025, 1200, Color.argb(225, 20, 46, 46));
+                rounded(c, 103, 700, 977, 1039, 28, DARK);
+                text(c, "ZAINO PIENO!", 540, 791, 70, ORANGE, true);
+                text(c, "NON PUOI SCAVARE ALTRO", 540, 856, 41, CREAM, true);
+                rounded(c, 178, 896, 901, 1000, 16, GOLD);
+                text(c, "VAI ALLA BASE", 540, 965, 48, DARK, true);
+            }
         }
 
         private void drawCell(Canvas c, int row, int col) {
@@ -545,11 +625,14 @@ public final class MainActivity extends Activity {
         }
 
         private void drawShop(Canvas c) {
-            text(c, "LABORATORIO", 540, 356, 62, DARK, true);
-            String[] names = {"PICCONE POTENZIATO", "TRIVELLA AUTOMATICA",
-                    "RADAR FOSSILI", "CARRELLO DA MINIERA"};
-            String[] desc = {"Piu' danni per tocco", "Scava anche da solo",
-                    "Piu' fossili negli strati", "Piu' monete dagli scavi"};
+            text(c, "POTENZIAMENTI", 540, 356, 62, DARK, true);
+            String[] names = {"PICCONE", "TRIVELLA AUTOMATICA", "RADAR FOSSILI", "ZAINO PIU' GRANDE"};
+            String[] desc = {"Rompi piu' velocemente i blocchi", "Scava da sola, ma si ferma a zaino pieno",
+                    "Piu' ossa negli strati", "Fai spedizioni piu' lunghe"};
+            String[] effect = {"FORZA " + pick + " > " + (pick + 1),
+                    "AUTO LIV. " + drill + " > " + (drill + 1),
+                    "CHANCE OSSA +" + radar * 2 + "%",
+                    "CAPACITA' " + capacity() + " > " + Math.min(160, 19 + cart * 7)};
             int[] levels = {pick, drill, radar, cart};
             for (int i = 0; i < 4; i++) {
                 int y = 400 + i * 300;
@@ -557,13 +640,14 @@ public final class MainActivity extends Activity {
                 rounded(c, 77, y + 15, 1003, y + 244, 20, Color.rgb(42, 83, 79));
                 rounded(c, 110, y + 55, 247, y + 189, 12, i % 2 == 0 ? GOLD : TEAL);
                 icon(c, i, 178, y + 126);
-                text(c, names[i], 281, y + 83, 36, CREAM, false);
-                text(c, desc[i], 281, y + 128, 28, Color.rgb(161, 213, 201), false);
-                text(c, "LIVELLO " + levels[i], 281, y + 182, 35, GOLD, false);
-                boolean enough = coins >= price(i);
-                rounded(c, 671, y + 170, 968, y + 226, 15,
+                text(c, names[i], 281, y + 83, 38, CREAM, false);
+                text(c, desc[i], 281, y + 126, 25, Color.rgb(161, 213, 201), false);
+                text(c, "LIV. " + levels[i] + "  " + effect[i], 281, y + 166, 27, GOLD, false);
+                boolean maxed = (i == 2 && radar >= 6) || (i == 3 && cart >= 22);
+                boolean enough = !maxed && coins >= price(i);
+                rounded(c, 671, y + 178, 968, y + 230, 15,
                         enough ? GOLD : Color.rgb(104, 119, 113));
-                text(c, money(price(i)) + " MONETE", 819, y + 209, 29,
+                text(c, maxed ? "MAX" : "COMPRA " + money(price(i)), 819, y + 214, 29,
                         enough ? DARK : CREAM, true);
             }
         }
@@ -597,17 +681,22 @@ public final class MainActivity extends Activity {
                 rounded(c, 90, y + 29, 287, y + 196, 12, Color.rgb(26, 55, 58));
                 dino(c, i, 186, y + 115, exhibits[i] ? GOLD : Color.rgb(104, 124, 116));
                 text(c, SPECIES[i], 313, y + 65, 40, CREAM, false);
-                text(c, exhibits[i] ? "ESPOSTO: +" + RENT[i] + "/SEC" :
-                        pieces[i] + "/" + NEED[i] + " OSSA", 313, y + 113, 31,
-                        exhibits[i] ? GOLD : Color.rgb(175, 226, 206), false);
                 if (exhibits[i]) {
-                    text(c, "COLLEZIONE COMPLETA", 312, y + 165, 28, GOLD, false);
-                    drawVisitors(c, i, y);
+                    long income = safe(RENT[i] * Math.pow(1.7, exhibitLevel[i] - 1) * amberBoost());
+                    text(c, "LIVELLO " + exhibitLevel[i] + "  +" + money(income) + "/SEC", 313, y + 113, 31, GOLD, false);
+                    text(c, "PIU' VISITATORI = PIU' INCASSI", 312, y + 159, 26, CREAM, false);
+                    boolean enough = coins >= museumPrice(i);
+                    rounded(c, 657, y + 143, 979, y + 195, 12,
+                            enough ? GOLD : Color.rgb(112, 124, 120));
+                    text(c, "MIGLIORA " + money(museumPrice(i)), 818, y + 179, 28,
+                            enough ? DARK : CREAM, true);
                 } else {
+                    text(c, pieces[i] + "/" + NEED[i] + " OSSA", 313, y + 113, 31,
+                            Color.rgb(175, 226, 206), false);
                     boolean enough = pieces[i] >= NEED[i] && coins >= ASSEMBLE[i];
                     rounded(c, 657, y + 143, 979, y + 195, 12,
                             enough ? GOLD : Color.rgb(112, 124, 120));
-                    text(c, money(ASSEMBLE[i]) + " ASSEMBLA", 818, y + 179, 29,
+                    text(c, "ASSEMBLA " + money(ASSEMBLE[i]), 818, y + 179, 29,
                             enough ? DARK : CREAM, true);
                 }
             }
@@ -642,16 +731,19 @@ public final class MainActivity extends Activity {
                 return true;
             }
             if (action != MotionEvent.ACTION_DOWN && action != MotionEvent.ACTION_MOVE) return true;
-            if (pendingSpecies >= 0) {
-                cleanAt(x, y);
+            if (action == MotionEvent.ACTION_DOWN && y >= 1728) {
+                page = Math.min(3, Math.max(0, (int)(x / 270f)));
+                notice(page == 0 ? "SCAVA FINO A RIEMPIRE LO ZAINO" :
+                        page == 1 ? "VENDI I REPERTI AL CAMPO BASE" :
+                        page == 2 ? "INVESTI IN ATTREZZATURA" : "ESPONI FOSSILI E GUADAGNA OFFLINE");
                 invalidate();
                 return true;
             }
-            if (action == MotionEvent.ACTION_DOWN && y >= 1728) {
-                int target = x < 365 ? 0 : x < 716 ? 1 : 2;
-                page = target;
-                notice(target == 0 ? "BUONA CACCIA AI FOSSILI!" :
-                        target == 1 ? "POTENZIA GLI ATTREZZI!" : "RICOSTRUISCI I DINOSAURI!");
+            if (page == 0 && full() && action == MotionEvent.ACTION_DOWN &&
+                    y >= 650 && y <= 1100) {
+                page = 1;
+                notice("IL CAMPO BASE COMPRA I TUOI REPERTI");
+                invalidate();
                 return true;
             }
             if (page == 0 && y >= GY && y < GY + N * CELL &&
@@ -663,11 +755,14 @@ public final class MainActivity extends Activity {
                     previousCell = index;
                 }
             } else if (action == MotionEvent.ACTION_DOWN && page == 1) {
+                if (y >= 829 && y <= 1018) sell();
+                else if (y >= 1490 && y <= 1585) ascend();
+            } else if (action == MotionEvent.ACTION_DOWN && page == 2) {
                 for (int i = 0; i < 4; i++) {
                     int top = 400 + i * 300;
                     if (y >= top && y < top + 257) { upgrade(i); break; }
                 }
-            } else if (action == MotionEvent.ACTION_DOWN && page == 2) {
+            } else if (action == MotionEvent.ACTION_DOWN && page == 3) {
                 for (int i = 0; i < SPECIES.length; i++) {
                     int top = 383 + i * 253;
                     if (y >= top && y < top + 226) { assemble(i); break; }
